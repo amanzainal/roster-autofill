@@ -1,32 +1,29 @@
 function vacantDutyList() {
-  // Get the active sheet
   const sheet = SpreadsheetApp.getActiveSheet();
+  const dutyCols = { 'D': 'Morning', 'E': 'Prep', 'F': 'Night' };
+  const startRow = 15;
+  const endRow = sheet.getLastRow();
+  const filledColors = ['#4a86e8', '#93c47d', '#e06666']; // Replace with actual color codes of filled cells
+  const vacantDuties = [];
 
-  // Set the range of cells to search for empty cells
-  const startRow = 15; // Change this to the first row of your range
-  const startCol = 4; // Change this to the first column of your range
-  const endRow = 45; // Change this to the last row of your range
-  const endCol = 6; // Change this to the last column of your range
-  const range = sheet.getRange(startRow, startCol, endRow - startRow + 1, endCol - startCol + 1);
-  
-  // Get the values of the range
-  const values = range.getValues();
-  const backgrounds = range.getBackgrounds();
-  
-  // Create an array of empty cells
-  const emptyCells = [];
-  values.forEach((row, rowIndex) => {
-    row.forEach((cell, colIndex) => {
-      const backgroundColor = backgrounds[rowIndex][colIndex];
-      if (cell === "" && backgroundColor === "#ffffff") {
-        const cellAddress = sheet.getRange(startRow + rowIndex, startCol + colIndex).getA1Notation();
-        emptyCells.push(cellAddress);
+  for (const col in dutyCols) {
+    for (let row = startRow; row <= endRow; row++) {
+      const cell = sheet.getRange(col + row);
+      const cellColor = cell.getBackground();
+
+      // Check if the cell's color is not one of the filled colors
+      if (!filledColors.includes(cellColor)) {
+        const cellDate = convertCellToDate('C' + row); // Assuming the date is in column C
+        vacantDuties.push({
+          cell: col + row,
+          type: dutyCols[col],
+          date: cellDate
+        });
       }
-    });
-  });
+    }
+  }
 
-  // Log the list of empty cells to the console
-  console.log("Empty cells: " + emptyCells.join(", "));
+  return vacantDuties;
 }
 
 
@@ -88,69 +85,134 @@ function getTutorsAvailability() {
   }
 
   // Log the tutor's availability for verification
-  console.log(tutorsAvailability);
-  console.log(JSON.stringify(tutorsAvailability, null, 2));
+  // console.log(tutorsAvailability);
+  // console.log(JSON.stringify(tutorsAvailability, null, 2));
 
   
   return tutorsAvailability;
 }
 
+
+// main driver
 function assignDuties() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const dutySheet = ss.getSheetByName('Duty Roster'); // Replace with your actual duty roster sheet name
+  const ss = SpreadsheetApp.getActiveSheet();
+  const dutySheet = ss;
   const tutorsAvailability = getTutorsAvailability(); // Get the availability object from the previous function
+  const vacantDuties = vacantDutyList(); // Assume this returns an array of objects with info about each vacant duty
 
-  // Get the vacant duty list (you would need to define how to retrieve this)
-  const vacantDuties = vacantDutyList(); // This should return an array of objects with cell coordinates and duty types
+  // Create a rotation index for each duty type to ensure fair distribution
+  let rotationIndices = {
+    'Morning': 0,
+    'Prep': 0,
+    'Night': 0
+  };
 
-  // Create a rotation index to ensure fair distribution
-  const tutorNames = Object.keys(tutorsAvailability);
-  let rotationIndex = 0;
+  // Sort tutors by name to have a consistent order for rotation
+  const tutorNames = Object.keys(tutorsAvailability).sort();
 
   // Iterate through each vacant duty
   vacantDuties.forEach(vacantDuty => {
-    let assigned = false;
+    let dutyAssigned = false;
 
-    // Try to assign duty to a tutor in a round-robin manner
-    while (!assigned) {
-      const tutorName = tutorNames[rotationIndex % tutorNames.length];
-      rotationIndex++;
+    // Track how many times we've looped through tutors to prevent infinite loops
+    let loopCount = 0;
 
-      // Check tutor availability for this duty
+    // Keep trying to assign duty until successful
+    while (!dutyAssigned && loopCount < tutorNames.length) {
+      const tutorName = tutorNames[rotationIndices[vacantDuty.type] % tutorNames.length];
+      rotationIndices[vacantDuty.type]++; // Move to the next tutor for this duty type
+
       if (isTutorAvailable(tutorName, vacantDuty, tutorsAvailability)) {
         // Assign duty to tutor
         dutySheet.getRange(vacantDuty.cell).setValue(tutorName);
-        assigned = true;
+        dutyAssigned = true;
       }
+
+      loopCount++;
+    }
+
+    if (!dutyAssigned) {
+      // Handle the case where no tutor was available for this duty
+      Logger.log('No tutor available for duty on ' + vacantDuty.date + ' for ' + vacantDuty.type);
     }
   });
 }
 
-function isTutorAvailable(tutorName, vacantDuty, tutorsAvailability) {
-  // Extract the date and type of duty from vacantDuty
-  const dutyDate = vacantDuty.date; // need to parse the cell to find the date
-  const dutyType = vacantDuty.type; // need to parse the cell or have this info in vacantDuty
 
-  // Check if tutor is unavailable on the specific dates
+// Utils
+function isTutorAvailable(tutorName, vacantDuty, tutorsAvailability) {
+  const dutyDate = new Date(formatDate(vacantDuty.date)); // Convert the date string to a Date object
+  const dutyType = vacantDuty.type;
+
+  // Helper function to check if a duty type matches the tutor's unavailability
+  function dutyMatchesUnavailableType(duty, unavailableType) {
+    if (unavailableType === 'All') return true;
+    if (unavailableType === duty) return true;
+    if (unavailableType === 'Prep + Night' && (duty === 'Prep' || duty === 'Night')) return true;
+    return false;
+  }
+
+  // Check specific dates unavailability
   if (tutorsAvailability[tutorName].dates) {
     for (const unavailability of tutorsAvailability[tutorName].dates) {
-      if (unavailability.date === dutyDate && unavailability.type.includes(dutyType)) {
-        return false;
+      if (dutyMatchesUnavailableType(dutyType, unavailability.type)) {
+        // Single date unavailability
+        if (unavailability.date) {
+          const unavailableDate = new Date(formatDate(unavailability.date));
+          if (isSameDate(dutyDate, unavailableDate)) {
+            return false;
+          }
+        }
+        // Date range unavailability
+        if (unavailability.start && unavailability.end) {
+          const startDate = new Date(formatDate(unavailability.start));
+          const endDate = new Date(formatDate(unavailability.end));
+          if (isDateInRange(dutyDate, startDate, endDate)) {
+            return false;
+          }
+        }
       }
-      // Check for date ranges and days of the week as well
     }
   }
 
-  // Check if tutor is unavailable on the specific days of the week
+  // Check days of the week unavailability
   if (tutorsAvailability[tutorName].days) {
     for (const unavailability of tutorsAvailability[tutorName].days) {
-      if (matchesDayOfWeek(unavailability.day, dutyDate) && unavailability.type.includes(dutyType)) {
-        return false;
+      if (dutyMatchesUnavailableType(dutyType, unavailability.type)) {
+        const unavailableDayIndex = convertDayStringToIndex(unavailability.day);
+        if (dutyDate.getDay() === unavailableDayIndex) {
+          return false;
+        }
       }
     }
   }
 
   return true;
+}
+
+// Helper functions
+function isSameDate(date1, date2) {
+  return date1.getDate() === date2.getDate() &&
+         date1.getMonth() === date2.getMonth() &&
+         date1.getFullYear() === date2.getFullYear();
+}
+
+function isDateInRange(date, start, end) {
+  return start <= date && date <= end;
+}
+
+function convertDayStringToIndex(dayString) {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return days.indexOf(dayString);
+}
+
+function formatDate(date) {
+  // Assuming the date is in "MMM dd" format, for example, "May 08"
+  const dateParts = date.split(" ");
+  const month = dateParts[0];
+  const day = parseInt(dateParts[1], 10);
+  const year = (new Date()).getFullYear();  // Assuming the year is the current year
+  return new Date(`${month} ${day}, ${year}`).toISOString().substring(0, 10);  // Returns date in "YYYY-MM-DD" format
 }
 
 function matchesDayOfWeek(day, date) {
@@ -159,10 +221,31 @@ function matchesDayOfWeek(day, date) {
   return day === dutyDayOfWeek;
 }
 
-function getDayOfWeekFromDate(date) {
-  // This is a placeholder function
-  return "Monday"; // Replace with actual logic
+function convertCellToDate(cellRef) {
+  // Get the active sheet
+  const sheet = SpreadsheetApp.getActiveSheet();
+  // Extract the row number from the cell reference
+  const rowNum = cellRef.match(/\d+/)[0];
+  // Get the date from column C of the same row
+  const dateCell = 'C' + rowNum;
+  const dateValue = sheet.getRange(dateCell).getDisplayValue();
+  
+  // Assuming the year is the current year
+  const year = new Date().getFullYear();
+  // Construct the full date string
+  const fullDateString = `${dateValue}, ${year}`;
+  
+  // Return the full date string
+  return fullDateString;
 }
 
-// The vacantDutyList() function needs to return an array with details of each vacant duty, including the cell reference, date, and duty type
+function getDayOfWeekFromDate(dateString) {
+  // Parse the date string into a Date object
+  const date = new Date(dateString);
+  // Get the day of the week as a string (e.g., "Monday")
+  const dayOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][date.getDay()];
+  return dayOfWeek;
+}
+
+
 
